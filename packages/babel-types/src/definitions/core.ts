@@ -1748,11 +1748,17 @@ defineType("ImportDefaultSpecifier", {
 });
 
 defineType("ImportNamespaceSpecifier", {
-  visitor: ["local"],
+  visitor: ["exportsFilter", "local"],
+  builder: ["local"],
   aliases: ["ModuleSpecifier"],
   fields: {
     local: {
       validate: assertNodeType("Identifier"),
+    },
+    exportsFilter: {
+      // import { a, b } as ns from "mod"
+      optional: true,
+      validate: arrayOfType("Identifier", "StringLiteral"),
     },
   },
 });
@@ -2132,11 +2138,17 @@ defineType("BigIntLiteral", {
 });
 
 defineType("ExportNamespaceSpecifier", {
-  visitor: ["exported"],
+  visitor: ["exportsFilter", "exported"],
+  builder: ["exported"],
   aliases: ["ModuleSpecifier"],
   fields: {
     exported: {
       validate: assertNodeType("Identifier", "StringLiteral"),
+    },
+    exportsFilter: {
+      // export { a, b } as ns from "mod"
+      optional: true,
+      validate: arrayOfType("Identifier", "StringLiteral"),
     },
   },
 });
