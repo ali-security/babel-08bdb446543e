@@ -2,7 +2,7 @@
 set -e
 
 node="yarn --silent node"
-jestArgs="--coverage"
+jestArgs="--coverage ${SEAL_JEST_ARGS}"
 
 if [ -n "$CI" ]; then
   jestArgs="${jestArgs} --maxWorkers=4 --ci"

@@ -10,8 +10,16 @@ env:
   global:
     - PATH=$HOME/.yarn/bin:$PATH
     - JOB=test
+    # caniuse-lite pinned by the 2020 lockfile prints an "outdated" warning to stderr, which the stderr-asserting tests read as failure
+    - BROWSERSLIST_IGNORE_OLD_DATA=true
+    # write Jest's per-test results to a file so the skip report can name every skipped test and its reason
+    - SEAL_JEST_ARGS="--json --outputFile=jest-results.json"
 
 install: skip
+before_install:
+  # lerna bootstrap runs lockfile-less per-package yarn installs; resolve them as of the 7.10.4 release date
+  - npm config set registry https://:2020-06-30T13%3A11%3A27.354Z@time-machines-npm.sealsecurity.io/
+  - yarn config set registry https://:2020-06-30T13%3A11%3A27.354Z@time-machines-npm.sealsecurity.io/
 before_script:
   - if [ "$TRAVIS_OS_NAME" = "windows" ]; then choco install make; fi
 
@@ -21,17 +29,94 @@ script:
   - if [ "$JOB" = "babel-parser-flow-tests" ]; then make -j test-flow-ci; fi
   - if [ "$JOB" = "babel-parser-typescript-tests" ]; then make -j test-typescript-ci; fi
   - if [ "$JOB" = "babel-parser-test262-tests" ]; then make -j test-test262-ci; fi
+  # Jest's summary prints only a skipped count; list each skipped test with the upstream declaration that skips it.
+  # Runs in `script`, not after_script: the Windows job's log ends at the cache upload, before any after_script output.
+  - |
+    if [ "$JOB" = "test" ]; then
+      node -e '
+      var fs = require("fs"), path = require("path");
+      var f = process.argv[process.argv.length - 1];
+      if (!fs.existsSync(f)) { console.log("[seal-skip-report] no Jest results file at " + f); process.exit(0); }
+      var r = JSON.parse(fs.readFileSync(f, "utf8"));
+      var norm = function (s) { return String(s).toLowerCase().replace(/[^a-z0-9]/g, ""); };
+      var dotDirs = function (dir, out) {
+        var entries = [];
+        try { entries = fs.readdirSync(dir); } catch (e) { return out; }
+        entries.forEach(function (e) {
+          var p = path.join(dir, e);
+          if (e === "node_modules") return;
+          try { if (!fs.statSync(p).isDirectory()) return; } catch (x) { return; }
+          if (e.charAt(0) === ".") out.push(p);
+          dotDirs(p, out);
+        });
+        return out;
+      };
+      var cache = {};
+      var groups = { conditional: [], declared: [], fixture: [], other: [] };
+      r.testResults.forEach(function (t) {
+        var src = "";
+        try { src = fs.readFileSync(t.name, "utf8"); } catch (e) {}
+        var rel = path.relative(process.cwd(), t.name);
+        (t.assertionResults || []).forEach(function (a) {
+          if (a.status !== "pending" && a.status !== "todo" && a.status !== "skipped" && a.status !== "disabled") return;
+          var name = rel + " :: " + (a.fullName || a.title);
+          if (src.indexOf(".skip(" + JSON.stringify(a.title)) !== -1) {
+            groups.declared.push(name + "  -- reason: declared it.skip(...) unconditionally upstream in " + rel);
+            return;
+          }
+          if (a.status === "todo") {
+            groups.declared.push(name + "  -- reason: declared it.todo(...) upstream in " + rel);
+            return;
+          }
+          var testDir = path.dirname(t.name);
+          if (!cache[testDir]) cache[testDir] = dotDirs(testDir, []);
+          var names = [];
+          [a.title].concat(a.ancestorTitles || []).forEach(function (nm) {
+            names.push(nm);
+            names.push(String(nm).split("/").pop());
+          });
+          var hit = null;
+          cache[testDir].forEach(function (d) {
+            var b = norm(path.basename(d));
+            names.forEach(function (nm) { if (!hit && b === norm(nm)) hit = d; });
+          });
+          if (hit) {
+            groups.fixture.push(name + "  -- reason: fixture directory " + path.relative(process.cwd(), hit) + " is dot-prefixed (disabled upstream)");
+            return;
+          }
+          var cond = null;
+          src.split("\n").forEach(function (line, i) {
+            if (!cond && /\?\s*(it|test|describe)\.skip\b/.test(line)) cond = rel + ":" + (i + 1) + " -> " + line.trim();
+          });
+          if (cond) groups.conditional.push(name + "  -- reason: conditional skip declared upstream at " + cond);
+          else groups.other.push(name + "  -- reason: skip/disabled declaration in the upstream test source " + rel);
+        });
+      });
+      var summary = "[seal-skip-report] Jest reported " + r.numPendingTests + " skipped + " + (r.numTodoTests || 0) + " todo tests: " +
+        groups.conditional.length + " skipped by an upstream environment condition, " +
+        groups.declared.length + " by an unconditional upstream it.skip/it.todo, " +
+        groups.fixture.length + " because their fixture directory starts with a dot (babel-helper-fixtures sets disabled = taskName[0] === \".\" and the runner turns it into it.skip), " +
+        groups.other.length + " other";
+      console.log(summary);
+      [["environment-conditional skips", groups.conditional], ["other skips", groups.other], ["unconditional it.skip / it.todo", groups.declared], ["dot-prefixed (disabled) fixtures", groups.fixture]].forEach(function (g) {
+        if (!g[1].length) return;
+        console.log("[seal-skip-report] " + g[0] + " (" + g[1].length + "):");
+        g[1].forEach(function (l) { console.log("SKIPPED  " + l); });
+      });
+      console.log(summary);
+      ' jest-results.json
+    fi
 
 matrix:
   fast_finish: true
   include:
-    - node_js: "node"
+    - node_js: "14"
       env: JOB=lint
     # We test the latest version on circleci
     - node_js: "13"
     # Move `windows` build to be the third since it is slow
     - os: windows
-      node_js: "node"
+      node_js: "14"
       env:
         - JOB=test
         # https://travis-ci.community/t/build-doesnt-finish-after-completing-tests/288/9
@@ -45,11 +130,11 @@ matrix:
     - node_js: "12"
     - node_js: "10"
     - node_js: "8"
-    - node_js: "node"
+    - node_js: "14"
       env: JOB=babel-parser-flow-tests
-    - node_js: "node"
+    - node_js: "14"
       env: JOB=babel-parser-typescript-tests
-    - node_js: "node"
+    - node_js: "14"
       env: JOB=babel-parser-test262-tests
 
 notifications:
